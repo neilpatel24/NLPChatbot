@@ -1,56 +1,130 @@
 import streamlit as st
+import json
 from openai import OpenAI
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+# App title
+st.title("💬 Chatbot with Memory")
+st.write("This chatbot uses OpenAI's GPT-3.5 and remembers context across chats.")
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
+# OpenAI API Key input
 openai_api_key = st.text_input("OpenAI API Key", type="password")
 if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+    st.info("Please enter your OpenAI API key.", icon="🔑")
+    st.stop()
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Create OpenAI client
+client = OpenAI(api_key=openai_api_key)
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Files for saving chat history and context
+HISTORY_FILE = "chat_history.json"
+CONTEXT_FILE = "chat_context.json"
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Load chat history from file
+def load_chat_history():
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+# Save chat history to file
+def save_chat_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=4)
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# Load context from file
+def load_context():
+    try:
+        with open(CONTEXT_FILE, "r") as f:
+            return json.load(f).get("context", "")
+    except FileNotFoundError:
+        return "You are a helpful assistant."
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+# Save context to file
+def save_context(context):
+    with open(CONTEXT_FILE, "w") as f:
+        json.dump({"context": context}, f, indent=4)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+# Extract important context automatically
+def extract_relevant_context(response_text):
+    """
+    Extracts key details from responses and stores them in context.
+    """
+    # Example: Identify sentences containing key phrases (modify as needed)
+    important_info = []
+    for line in response_text.split(". "):
+        if any(keyword in line.lower() for keyword in ["you are", "remember that", "your name is", "your task is"]):
+            important_info.append(line)
+    
+    if important_info:
+        new_context = "\n".join(important_info)
+        st.session_state.context += f"\n{new_context}"
+        save_context(st.session_state.context)
+
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "full_chat_history" not in st.session_state:
+    st.session_state.full_chat_history = load_chat_history()
+
+if "context" not in st.session_state:
+    st.session_state.context = load_context()
+
+# Display stored context
+st.write("### Stored Context:")
+st.write(st.session_state.context)
+
+# Button to load previous chat history
+if st.button("Load Previous Chats"):
+    st.session_state.messages = st.session_state.full_chat_history
+
+# Display previous chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Chat input
+if prompt := st.chat_input("Type your message..."):
+    
+    # Store user input
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
+    # Prepare full prompt with context
+    full_prompt = f"Context: {st.session_state.context}\nUser: {prompt}"
+    
+    # Generate AI response
+    stream = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": st.session_state.context}] + st.session_state.messages,
+        stream=True,
+    )
+    
+    # Collect response
+    response_text = ""
+    with st.chat_message("assistant"):
+        response_container = st.empty()
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                response_text += chunk.choices[0].delta.content
+                response_container.markdown(response_text)
+    
+    # Store response
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
+    
+    # Extract and update context automatically
+    extract_relevant_context(response_text)
+    
+    # Update full chat history and save
+    st.session_state.full_chat_history.extend([
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": response_text},
+    ])
+    save_chat_history(st.session_state.full_chat_history)
+
+# Reset chat (only clears session, keeps saved history and context)
+if st.button("Reset Chat"):
+    st.session_state.messages = []  # Clears session chat only
+    st.rerun()
